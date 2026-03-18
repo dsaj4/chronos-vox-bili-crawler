@@ -1,0 +1,13 @@
+artifacts/
+browser_data/
+MediaCrawler/.venv/
+MediaCrawler/browser_data/
+MediaCrawler/data/
+MediaCrawler/cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.DS_Store
