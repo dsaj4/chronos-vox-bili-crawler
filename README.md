@@ -41,3 +41,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_bili_ai_monitor.ps1 -Ac
 
 - Runtime data is written under `artifacts/` when the monitor runs.
 - This export intentionally excludes local runtime data, browser profiles, and virtual environments.
+
+## Chronos-Vox handoff
+
+When you want to hand a completed crawl to Chronos-Vox, export a crawl result manifest first:
+
+```powershell
+python .\scripts\export_crawl_result_manifest.py `
+  --output .\artifacts\ai_crawl_monitor\crawl_result_manifest.json
+```
+
+The manifest is a stable file-system contract for the Chronos-Vox ingest bridge. The main workspace consumes it and derives the normalized batch, analysis job, and workspace session from that file.
