@@ -1,54 +1,97 @@
-# Chronos Vox Bili Crawler
+# Chronos Vox Multi-Platform Crawler
 
-This repository extracts the Bilibili crawler portion from the larger Chronos Vox workspace.
+这个仓库目前包含三套按天分桶的增量爬虫：
 
-It includes:
+- `bili`: Bilibili
+- `zhihu`: Zhihu
+- `xhs`: Xiaohongshu
 
-- `MediaCrawler/`: crawler core and storage implementation
-- `scripts/run_bili_ai_time_range_job.py`: continuous backfill runner
-- `scripts/bili_ai_time_range_monitor.py`: watchdog and auto-restart monitor
-- `scripts/start_bili_ai_monitor.ps1`: one-click start/stop/status wrapper
+以及一套统一的本机 monitor 内核，用来负责：
 
-## Current defaults
+- 子进程拉起和停止
+- checkpoint 续跑
+- 卡死检测
+- 日志隔离
+- `status/start/run/stop` 统一接口
 
-- Keyword: `ai`
-- Platform: `bili`
-- Continuous backfill: enabled
-- Max videos per day: `5`
-- Max comments per video: `500`
-- Max sub-comments per video: `50`
+详细说明见 [docs/crawler-monitoring-guide.md](docs/crawler-monitoring-guide.md)。
 
-## Layout
+## 快速开始
 
-```text
-MediaCrawler/
-scripts/
-```
-
-The scripts expect `MediaCrawler` and `scripts` to be sibling folders at repo root.
-
-## Quick start
-
-From PowerShell:
+PowerShell 下推荐直接使用平台脚本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start_bili_ai_monitor.ps1 -Action start
-powershell -ExecutionPolicy Bypass -File .\scripts\start_bili_ai_monitor.ps1 -Action status
-powershell -ExecutionPolicy Bypass -File .\scripts\start_bili_ai_monitor.ps1 -Action stop
+powershell -ExecutionPolicy Bypass -File .\scripts\start_zhihu_monitor.ps1 -Action start
+powershell -ExecutionPolicy Bypass -File .\scripts\start_xhs_monitor.ps1 -Action start
 ```
 
-## Notes
-
-- Runtime data is written under `artifacts/` when the monitor runs.
-- This export intentionally excludes local runtime data, browser profiles, and virtual environments.
-
-## Chronos-Vox handoff
-
-When you want to hand a completed crawl to Chronos-Vox, export a crawl result manifest first:
+查询状态：
 
 ```powershell
-python .\scripts\export_crawl_result_manifest.py `
-  --output .\artifacts\ai_crawl_monitor\crawl_result_manifest.json
+powershell -ExecutionPolicy Bypass -File .\scripts\start_bili_ai_monitor.ps1 -Action status
+powershell -ExecutionPolicy Bypass -File .\scripts\start_zhihu_monitor.ps1 -Action status
+powershell -ExecutionPolicy Bypass -File .\scripts\start_xhs_monitor.ps1 -Action status
 ```
 
-The manifest is a stable file-system contract for the Chronos-Vox ingest bridge. The main workspace consumes it and derives the normalized batch, analysis job, and workspace session from that file.
+统一入口也可以直接使用：
+
+```powershell
+.\MediaCrawler\.venv\Scripts\python.exe .\scripts\crawl_monitor.py status --platform bili --json
+.\MediaCrawler\.venv\Scripts\python.exe .\scripts\crawl_monitor.py status --platform zhihu --json
+.\MediaCrawler\.venv\Scripts\python.exe .\scripts\crawl_monitor.py status --platform xhs --json
+```
+
+## 目录
+
+```text
+MediaCrawler/
+  media_platform/
+  store/
+  tools/
+scripts/
+artifacts/
+docs/
+```
+
+关键脚本：
+
+- `scripts/crawl_monitor.py`: 统一 monitor CLI
+- `scripts/monitor_core.py`: 统一 monitor 内核
+- `scripts/run_bili_ai_time_range_job.py`: Bilibili runner
+- `scripts/run_zhihu_time_range_job.py`: Zhihu runner
+- `scripts/run_xhs_time_range_job.py`: Xiaohongshu runner
+
+## 产物
+
+默认产物目录：
+
+```text
+artifacts/ai_crawl_data/<platform>/json/
+```
+
+运行时目录：
+
+```text
+artifacts/<platform>_crawl_monitor/
+```
+
+其中包含：
+
+- `status.json`
+- `checkpoint.json`
+- `monitor.log`
+- `latest_run.json`
+- `runs/<run_id>/crawler.log`
+
+## 当前实现要点
+
+- Bilibili: 绝对时间范围按天回填，内容、评论、创作者按天分桶
+- Zhihu: 一年窗流式搜索，按内容真实发布日期实时分桶
+- Xiaohongshu: 搜索结果抓详情后按内容发布时间做客户端日分桶
+
+## 注意
+
+- 本仓库默认是本机长期运行方案，不是分布式调度方案
+- `artifacts/` 下的运行时文件和数据文件不会自动清理
+- 如果同一平台同时起两套 monitor，会污染同一份产物目录，所以请只通过 monitor 脚本启动

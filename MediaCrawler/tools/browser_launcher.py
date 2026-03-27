@@ -196,6 +196,12 @@ class BrowserLauncher:
 
         start_time = time.time()
         while time.time() - start_time < timeout:
+            if self.browser_process and self.browser_process.poll() is not None:
+                utils.logger.error(
+                    f"[BrowserLauncher] Browser process exited before CDP became ready "
+                    f"(exit_code={self.browser_process.returncode})"
+                )
+                return False
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(1)

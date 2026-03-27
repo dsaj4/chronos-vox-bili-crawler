@@ -53,36 +53,70 @@ class XiaoHongShuLogin(AbstractLogin):
         """
         Verify login status using dual-check: UI elements and Cookies.
         """
-        # 1. Priority check: Check if the "Me" (Profile) node appears in the sidebar
+        if await self.page_requires_login():
+            return False
+
+        # 1. Check for CAPTCHA prompt
+        if "请通过验证" in await self.context_page.content():
+            utils.logger.info("[XiaoHongShuLogin.check_login_state] CAPTCHA appeared, please verify manually.")
+
+        # 2. Cookie-based detection is more reliable than sidebar UI on Xiaohongshu,
+        # because anonymous pages can still render profile-related anchors.
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        current_web_session = cookie_dict.get("web_session")
+        if current_web_session and current_web_session != no_logged_in_session:
+            if await self.confirm_logged_in_browser_state():
+                utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by Cookie (web_session changed).")
+                return True
+            return False
+
+        if current_web_session:
+            if await self.confirm_logged_in_browser_state():
+                utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by page state and existing web_session.")
+                return True
+            return False
+
+        return False
+
+    async def page_requires_login(self) -> bool:
         try:
-            # Selector for elements containing "Me" text with a link pointing to the profile
-            # XPath Explanation: Find a span with text "Me" inside an anchor tag (<a>) 
-            # whose href attribute contains "/user/profile/"
-            user_profile_selector = "xpath=//a[contains(@href, '/user/profile/')]//span[text()='我']"
-            
-            # Set a short timeout since this is called within a retry loop
-            is_visible = await self.context_page.is_visible(user_profile_selector, timeout=500)
-            if is_visible:
-                utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by UI element ('Me' button).")
+            body_text = await self.context_page.locator("body").inner_text()
+        except Exception:
+            body_text = ""
+
+        login_markers = (
+            "登录后推荐更懂你的笔记",
+            "马上登录即可",
+            "输入手机号",
+            "获取验证码",
+            "小红书或微信扫码",
+        )
+        if any(marker in body_text for marker in login_markers):
+            return True
+
+        try:
+            placeholder = await self.context_page.locator("input.search-input").first.get_attribute("placeholder")
+            if placeholder and "登录" in placeholder:
                 return True
         except Exception:
             pass
 
-        # 2. Alternative: Check for CAPTCHA prompt
-        if "请通过验证" in await self.context_page.content():
-            utils.logger.info("[XiaoHongShuLogin.check_login_state] CAPTCHA appeared, please verify manually.")
-
-        # 3. Compatibility fallback: Original Cookie-based change detection
-        current_cookie = await self.browser_context.cookies()
-        _, cookie_dict = utils.convert_cookies(current_cookie)
-        current_web_session = cookie_dict.get("web_session")
-        
-        # If web_session has changed, consider the login successful
-        if current_web_session and current_web_session != no_logged_in_session:
-            utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by Cookie (web_session changed).")
-            return True
+        try:
+            if await self.context_page.locator("img.qrcode-img").count() > 0:
+                return True
+        except Exception:
+            pass
 
         return False
+
+    async def confirm_logged_in_browser_state(self) -> bool:
+        try:
+            await self.context_page.goto("https://www.xiaohongshu.com/explore", wait_until="commit", timeout=15000)
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+        return not await self.page_requires_login()
 
     async def begin(self):
         """Start login xiaohongshu"""
@@ -213,12 +247,18 @@ class XiaoHongShuLogin(AbstractLogin):
     async def login_by_cookies(self):
         """login xiaohongshu website by cookies"""
         utils.logger.info("[XiaoHongShuLogin.login_by_cookies] Begin login xiaohongshu by cookie ...")
-        for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
-            if key != "web_session":  # Only set web_session cookie attribute
-                continue
-            await self.browser_context.add_cookies([{
-                'name': key,
-                'value': value,
-                'domain': ".xiaohongshu.com",
-                'path': "/"
-            }])
+        cookies = [{
+            "name": key,
+            "value": value,
+            "domain": ".xiaohongshu.com",
+            "path": "/",
+        } for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items()]
+        if not cookies:
+            utils.logger.info("[XiaoHongShuLogin.login_by_cookies] No cookies were provided.")
+            return
+
+        await self.browser_context.add_cookies(cookies)
+        utils.logger.info(
+            f"[XiaoHongShuLogin.login_by_cookies] Injected {len(cookies)} cookies into browser context."
+        )
+        await self.context_page.reload(wait_until="domcontentloaded")

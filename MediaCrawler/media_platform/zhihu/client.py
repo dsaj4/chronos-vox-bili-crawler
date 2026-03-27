@@ -301,6 +301,8 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
         offset: str = ""
         prev_offset: str = ""
         limit: int = 10
+        root_comment_limit = max(int(getattr(config, "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", 0) or 0), 0)
+        root_comments_collected = 0
         while not is_end:
             prev_offset = offset
             root_comment_res = await self.get_root_comments(content.content_id, content.content_type, offset, limit)
@@ -314,6 +316,14 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
             if not comments:
                 break
 
+            if root_comment_limit:
+                remaining_root_comments = root_comment_limit - len(result)
+                if remaining_root_comments <= 0:
+                    break
+                comments = comments[:remaining_root_comments]
+                if not comments:
+                    break
+
             if prev_offset == offset:
                 break
 
@@ -321,7 +331,16 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                 await callback(comments)
 
             result.extend(comments)
-            await self.get_comments_all_sub_comments(content, comments, crawl_interval=crawl_interval, callback=callback)
+            root_comments_collected += len(comments)
+            sub_comments = await self.get_comments_all_sub_comments(
+                content,
+                comments,
+                crawl_interval=crawl_interval,
+                callback=callback,
+            )
+            result.extend(sub_comments)
+            if root_comment_limit and root_comments_collected >= root_comment_limit:
+                break
             await asyncio.sleep(crawl_interval)
         return result
 
@@ -347,6 +366,10 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
             return []
 
         all_sub_comments: List[ZhihuComment] = []
+        sub_comment_limit = max(
+            int(getattr(config, "ZHIHU_MAX_SUB_COMMENTS_COUNT_SINGLENOTES", 0) or 0),
+            0,
+        )
         for parment_comment in comments:
             if parment_comment.sub_comment_count == 0:
                 continue
@@ -368,6 +391,14 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                 if not sub_comments:
                     break
 
+                if sub_comment_limit:
+                    remaining_sub_comments = sub_comment_limit - len(all_sub_comments)
+                    if remaining_sub_comments <= 0:
+                        return all_sub_comments
+                    sub_comments = sub_comments[:remaining_sub_comments]
+                    if not sub_comments:
+                        return all_sub_comments
+
                 if prev_offset == offset:
                     break
 
@@ -375,6 +406,8 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
                     await callback(sub_comments)
 
                 all_sub_comments.extend(sub_comments)
+                if sub_comment_limit and len(all_sub_comments) >= sub_comment_limit:
+                    return all_sub_comments
                 await asyncio.sleep(crawl_interval)
         return all_sub_comments
 

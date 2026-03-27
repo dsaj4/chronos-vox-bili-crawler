@@ -25,7 +25,6 @@
 
 import asyncio
 import functools
-import sys
 from typing import Optional
 
 from playwright.async_api import BrowserContext, Page
@@ -95,7 +94,7 @@ class BilibiliLogin(AbstractLogin):
         )
         if not base64_qrcode_img:
             utils.logger.info("[BilibiliLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-            sys.exit()
+            raise RuntimeError("Bilibili qrcode login failed: qrcode was not found on the page.")
 
         # show login qrcode
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
@@ -106,7 +105,7 @@ class BilibiliLogin(AbstractLogin):
             await self.check_login_state()
         except RetryError:
             utils.logger.info("[BilibiliLogin.login_by_qrcode] Login bilibili failed by qrcode login method ...")
-            sys.exit()
+            raise RuntimeError("Bilibili qrcode login failed: login was not confirmed before timeout.")
 
         wait_redirect_seconds = 5
         utils.logger.info(

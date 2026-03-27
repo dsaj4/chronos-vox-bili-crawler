@@ -6,4 +6,4 @@ from monitor_core import main_for_platform
 
 
 if __name__ == "__main__":
-    raise SystemExit(main_for_platform("bili", entry_script=Path(__file__).resolve()))
+    raise SystemExit(main_for_platform("xhs", entry_script=Path(__file__).resolve()))

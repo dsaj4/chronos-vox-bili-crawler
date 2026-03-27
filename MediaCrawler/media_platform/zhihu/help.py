@@ -20,10 +20,14 @@
 
 # -*- coding: utf-8 -*-
 import json
+import os
+from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import execjs
+from execjs._external_runtime import ExternalRuntime
+from execjs import _runtimes as execjs_runtimes
 from parsel import Selector
 
 from constant import zhihu as zhihu_constant
@@ -32,6 +36,45 @@ from tools import utils
 from tools.crawler_util import extract_text_from_html
 
 ZHIHU_SGIN_JS = None
+
+
+def _find_local_node_executable() -> Optional[Path]:
+    current_file = Path(__file__).resolve()
+    candidate_dirs = [
+        current_file.parents[4] / "tools" / "node-v24.14.0-win-x64",
+        current_file.parents[3] / "tools" / "node-v24.14.0-win-x64",
+    ]
+    for candidate_dir in candidate_dirs:
+        node_exe = candidate_dir / "node.exe"
+        if node_exe.exists():
+            return node_exe
+    return None
+
+
+def _load_execjs_runtime():
+    node_exe = _find_local_node_executable()
+    if node_exe is not None:
+        candidate_dir = str(node_exe.parent)
+        current_path = os.environ.get("PATH", "")
+        path_entries = current_path.split(os.pathsep) if current_path else []
+        if candidate_dir not in path_entries:
+            os.environ["PATH"] = candidate_dir + os.pathsep + current_path if current_path else candidate_dir
+
+        for runtime_name, runtime in execjs_runtimes._runtimes:
+            if runtime_name != "Node":
+                continue
+            return ExternalRuntime(
+                name=runtime.name,
+                command=["node"],
+                runner_source=runtime._runner_source,
+                encoding=runtime._encoding,
+                tempfile=runtime._tempfile,
+            )
+    try:
+        runtime = execjs.get("Node")
+    except Exception:
+        runtime = execjs.get()
+    return runtime
 
 
 def sign(url: str, cookies: str) -> Dict:
@@ -46,8 +89,9 @@ def sign(url: str, cookies: str) -> Dict:
     """
     global ZHIHU_SGIN_JS
     if not ZHIHU_SGIN_JS:
+        runtime = _load_execjs_runtime()
         with open("libs/zhihu.js", mode="r", encoding="utf-8-sig") as f:
-            ZHIHU_SGIN_JS = execjs.compile(f.read())
+            ZHIHU_SGIN_JS = runtime.compile(f.read())
 
     return ZHIHU_SGIN_JS.call("get_sign", url, cookies)
 

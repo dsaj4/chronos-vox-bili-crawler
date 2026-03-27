@@ -52,6 +52,7 @@ from database.models import BilibiliVideo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import bilibili as bilibili_store
 from tools import utils
+from tools.browser_launcher import BrowserLauncher
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
@@ -890,6 +891,75 @@ class BilibiliCrawler(AbstractCrawler):
         )
         return bilibili_client_obj
 
+    @staticmethod
+    def get_launch_channel_candidates() -> List[Optional[str]]:
+        launcher = BrowserLauncher()
+        channels: List[Optional[str]] = []
+        for browser_path in launcher.detect_browser_paths():
+            lower_path = browser_path.lower()
+            if "chrome.exe" in lower_path and "google\\chrome" in lower_path and "chrome" not in channels:
+                channels.append("chrome")
+            elif "msedge.exe" in lower_path and "msedge" not in channels:
+                channels.append("msedge")
+        channels.append(None)
+        return channels
+
+    async def try_launch_browser_context(
+        self,
+        chromium: BrowserType,
+        *,
+        persistent: bool,
+        headless: bool,
+        playwright_proxy: Optional[Dict],
+        user_agent: Optional[str],
+        user_data_dir: Optional[str] = None,
+    ) -> BrowserContext:
+        last_error: Optional[Exception] = None
+        for channel in self.get_launch_channel_candidates():
+            launch_kwargs = {
+                "headless": headless,
+                "proxy": playwright_proxy,
+            }
+            context_kwargs = {
+                "viewport": {"width": 1920, "height": 1080},
+                "user_agent": user_agent,
+            }
+            if channel:
+                launch_kwargs["channel"] = channel
+
+            try:
+                if persistent:
+                    browser_context = await chromium.launch_persistent_context(
+                        user_data_dir=user_data_dir,
+                        accept_downloads=True,
+                        viewport=context_kwargs["viewport"],
+                        user_agent=context_kwargs["user_agent"],
+                        **launch_kwargs,  # type: ignore[arg-type]
+                    )
+                    utils.logger.info(
+                        f"[BilibiliCrawler.launch_browser] Created persistent context using "
+                        f"{channel or 'bundled Chromium'}"
+                    )
+                    return browser_context
+
+                browser = await chromium.launch(**launch_kwargs)  # type: ignore[arg-type]
+                browser_context = await browser.new_context(**context_kwargs)
+                utils.logger.info(
+                    f"[BilibiliCrawler.launch_browser] Created browser context using "
+                    f"{channel or 'bundled Chromium'}"
+                )
+                return browser_context
+            except Exception as exc:
+                last_error = exc
+                utils.logger.warning(
+                    f"[BilibiliCrawler.launch_browser] Failed to launch with "
+                    f"{channel or 'bundled Chromium'}: {self.format_exception_details(exc)}"
+                )
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No browser launch candidates were available")
+
     async def launch_browser(
         self,
         chromium: BrowserType,
@@ -910,23 +980,23 @@ class BilibiliCrawler(AbstractCrawler):
             # feat issue #14
             # we will save login state to avoid login every time
             user_data_dir = os.path.join(os.getcwd(), "browser_data", config.USER_DATA_DIR % config.PLATFORM)  # type: ignore
-            browser_context = await chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                accept_downloads=True,
+            browser_context = await self.try_launch_browser_context(
+                chromium,
+                persistent=True,
                 headless=headless,
-                proxy=playwright_proxy,  # type: ignore
-                viewport={
-                    "width": 1920,
-                    "height": 1080
-                },
+                playwright_proxy=playwright_proxy,
                 user_agent=user_agent,
-                channel="chrome",  # Use system's stable Chrome version
+                user_data_dir=user_data_dir,
             )
             return browser_context
         else:
-            # type: ignore
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel="chrome")
-            browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+            browser_context = await self.try_launch_browser_context(
+                chromium,
+                persistent=False,
+                headless=headless,
+                playwright_proxy=playwright_proxy,
+                user_agent=user_agent,
+            )
             return browser_context
 
     async def launch_browser_with_cdp(

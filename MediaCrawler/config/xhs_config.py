@@ -23,6 +23,18 @@
 # Sorting method, the specific enumeration value is in media_platform/xhs/field.py
 SORT_TYPE = "popularity_descending"
 
+# Control the number of notes crawled per day in daily bucket mode
+MAX_NOTES_PER_DAY = 5
+
+# Specify time range for daily bucket crawling
+START_DAY = "2024-01-01"
+END_DAY = "2024-01-01"
+
+# Search mode
+# normal: regular keyword search
+# daily_limit_in_time_range: latest-sorted search with client-side day bucketing and MAX_NOTES_PER_DAY cap
+XHS_SEARCH_MODE = "normal"
+
 # Specify the note URL list, which must carry the xsec_token parameter
 XHS_SPECIFIED_NOTE_URL_LIST = [
     "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"

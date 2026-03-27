@@ -4,7 +4,7 @@ param(
   [string]$Keyword = "ai",
   [string]$StartDay = (Get-Date -Format "yyyy-MM-dd"),
   [string]$EndDay = (Get-Date -Format "yyyy-MM-dd"),
-  [string]$OldestDay = "2009-06-26",
+  [string]$OldestDay = (Get-Date).AddDays(-364).ToString("yyyy-MM-dd"),
   [int]$CheckIntervalSeconds = 30,
   [int]$StallTimeoutSeconds = 300,
   [switch]$Headless,
@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root "MediaCrawler\.venv\Scripts\python.exe"
 $monitorScript = Join-Path $root "scripts\crawl_monitor.py"
-$statusPath = Join-Path $root "artifacts\ai_crawl_monitor\status.json"
+$statusPath = Join-Path $root "artifacts\zhihu_crawl_monitor\status.json"
 $commandName = if ($Action -eq "foreground") { "run" } else { $Action }
 
 if (-not (Test-Path $python)) {
@@ -30,7 +30,7 @@ if (-not (Test-Path $monitorScript)) {
 $commonArgs = @(
   $monitorScript,
   $commandName,
-  "--platform", "bili"
+  "--platform", "zhihu"
 )
 
 if ($Action -in @("start", "foreground")) {
@@ -60,7 +60,7 @@ $exitCode = $LASTEXITCODE
 
 if ($Action -eq "start" -and $exitCode -eq 0) {
   Write-Host ""
-  Write-Host "Bilibili ai crawl monitor started."
+  Write-Host "Zhihu crawl monitor started."
   Write-Host "Status:  $statusPath"
   Write-Host "Command: powershell -ExecutionPolicy Bypass -File $PSCommandPath -Action status"
   Write-Host ""

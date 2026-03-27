@@ -17,11 +17,13 @@ if str(MEDIA_CRAWLER_ROOT) not in sys.path:
     sys.path.insert(0, str(MEDIA_CRAWLER_ROOT))
 
 import config  # noqa: E402
-from media_platform.bilibili.core import BilibiliCrawler  # noqa: E402
+from media_platform.xhs.core import XiaoHongShuCrawler  # noqa: E402
 
 
-DEFAULT_CHECKPOINT_PATH = ROOT_DIR / "artifacts" / "ai_crawl_monitor" / "checkpoint.json"
-PREFERRED_JOB_PATH = ROOT_DIR / "artifacts" / "ai_crawl_monitor" / "preferred_job.json"
+DEFAULT_CHECKPOINT_PATH = ROOT_DIR / "artifacts" / "xhs_crawl_monitor" / "checkpoint.json"
+PREFERRED_JOB_PATH = ROOT_DIR / "artifacts" / "xhs_crawl_monitor" / "preferred_job.json"
+DEFAULT_SAVE_DATA_PATH = ROOT_DIR / "artifacts" / "ai_crawl_data"
+DEFAULT_OLDEST_DAY = date(2013, 1, 1)
 
 
 def configure_console_output() -> None:
@@ -40,28 +42,17 @@ def parse_iso_date(value: str | None) -> date | None:
         return None
 
 
+def default_oldest_day() -> date:
+    return DEFAULT_OLDEST_DAY
+
+
 def is_job_long_backfill(job: dict[str, Any]) -> bool:
     return bool(job.get("continuous_backfill")) and bool(parse_iso_date(str(job.get("oldest_day") or "")))
 
 
-def should_preserve_checkpoint_job(args: argparse.Namespace, checkpoint_job: dict[str, Any]) -> bool:
-    if not checkpoint_job:
-        return False
-    if not is_job_long_backfill(checkpoint_job):
-        return False
-
-    incoming_oldest_day = parse_iso_date(args.oldest_day)
-    checkpoint_oldest_day = parse_iso_date(str(checkpoint_job.get("oldest_day") or ""))
-    if checkpoint_oldest_day is None:
-        return False
-    if incoming_oldest_day is None:
-        return True
-    return checkpoint_oldest_day < incoming_oldest_day
-
-
 def same_job_series(args: argparse.Namespace, job: dict[str, Any]) -> bool:
     return (
-        str(job.get("platform") or "") == "bili"
+        str(job.get("platform") or "") == "xhs"
         and str(job.get("keyword") or "") == args.keyword
         and bool(job.get("continuous_backfill")) == bool(args.continuous_backfill)
         and str(job.get("save_data_option") or "") == str(args.save_data_option)
@@ -84,19 +75,18 @@ def choose_preferred_job(*jobs: dict[str, Any]) -> dict[str, Any] | None:
 
 def parse_args() -> argparse.Namespace:
     today = date.today().isoformat()
-    parser = argparse.ArgumentParser(description="Run a single Bilibili time-range crawl job for keyword ai.")
+    parser = argparse.ArgumentParser(description="Run a single Xiaohongshu time-range crawl job.")
     parser.add_argument("--keyword", default="ai")
     parser.add_argument("--start-day", default=today)
     parser.add_argument("--end-day", default=today)
-    parser.add_argument("--oldest-day", default="2009-06-26")
+    parser.add_argument("--oldest-day", default=default_oldest_day().isoformat())
     parser.add_argument("--continuous-backfill", action="store_true")
     parser.add_argument("--save-data-option", default="json")
-    parser.add_argument("--save-data-path", default=str(ROOT_DIR / "artifacts" / "ai_crawl_data"))
+    parser.add_argument("--save-data-path", default=str(DEFAULT_SAVE_DATA_PATH))
     parser.add_argument("--checkpoint-path", default=str(DEFAULT_CHECKPOINT_PATH))
     parser.add_argument("--login-type", default="qrcode")
     parser.add_argument("--max-notes-per-day", type=int, default=5)
-    parser.add_argument("--max-comment-items", type=int, default=500)
-    parser.add_argument("--max-sub-comment-items", type=int, default=50)
+    parser.add_argument("--max-comment-items", type=int, default=200)
     parser.add_argument("--max-concurrency-num", type=int, default=1)
     parser.add_argument("--crawler-sleep-seconds", type=float, default=2.0)
     parser.add_argument("--headless", action="store_true")
@@ -123,7 +113,7 @@ def adopt_checkpoint_job_if_preferred(args: argparse.Namespace, checkpoint_path:
             preferred_job = {}
 
     incoming_job = {
-        "platform": "bili",
+        "platform": "xhs",
         "keyword": args.keyword,
         "start_day": args.start_day,
         "end_day": args.end_day,
@@ -132,11 +122,7 @@ def adopt_checkpoint_job_if_preferred(args: argparse.Namespace, checkpoint_path:
         "save_data_option": args.save_data_option,
         "save_data_path": str(Path(args.save_data_path).resolve()),
     }
-    selected_job = choose_preferred_job(
-        checkpoint_job,
-        preferred_job,
-        incoming_job,
-    )
+    selected_job = choose_preferred_job(checkpoint_job, preferred_job, incoming_job)
     if not selected_job or not same_job_series(args, selected_job):
         return args
     if selected_job == incoming_job:
@@ -165,7 +151,7 @@ def adopt_checkpoint_job_if_preferred(args: argparse.Namespace, checkpoint_path:
     return adopted
 
 
-class CheckpointedBilibiliCrawler(BilibiliCrawler):
+class CheckpointedXhsCrawler(XiaoHongShuCrawler):
     def __init__(self, checkpoint_path: Path, args: argparse.Namespace):
         super().__init__()
         self.checkpoint_path = checkpoint_path
@@ -174,7 +160,7 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
 
     def job_identity(self) -> dict[str, Any]:
         return {
-            "platform": "bili",
+            "platform": "xhs",
             "keyword": self.args.keyword,
             "start_day": self.args.start_day,
             "end_day": self.args.end_day,
@@ -374,7 +360,7 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
                 "current_day": day,
                 "resume_day": next_day or day,
                 "resume_page": 1,
-                "notes_count_this_day": 0 if next_day else 0,
+                "notes_count_this_day": 0,
                 "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                 "last_completed_day": day,
                 "last_completed_page": None,
@@ -467,20 +453,19 @@ def configure_job(args: argparse.Namespace, *, start_day: str | None = None, end
 
     total_days = (end_day_date - start_day_date).days + 1
 
-    config.PLATFORM = "bili"
+    config.PLATFORM = "xhs"
     config.LOGIN_TYPE = args.login_type
     config.CRAWLER_TYPE = "search"
     config.KEYWORDS = args.keyword
     config.SAVE_DATA_OPTION = args.save_data_option
     config.SAVE_DATA_PATH = args.save_data_path
     config.OUTPUT_DATE_OVERRIDE = effective_start_day
-    config.BILI_SEARCH_MODE = "daily_limit_in_time_range"
+    config.XHS_SEARCH_MODE = "daily_limit_in_time_range"
     config.START_DAY = effective_start_day
     config.END_DAY = effective_end_day
+    config.SORT_TYPE = "time_descending"
     config.MAX_NOTES_PER_DAY = args.max_notes_per_day
     config.CRAWLER_MAX_NOTES_COUNT = max(total_days * args.max_notes_per_day, args.max_notes_per_day)
-    config.BILI_MAX_COMMENT_ITEMS_PER_VIDEO = args.max_comment_items
-    config.BILI_MAX_SUB_COMMENTS_PER_VIDEO = args.max_sub_comment_items
     config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = args.max_comment_items
     config.MAX_CONCURRENCY_NUM = args.max_concurrency_num
     config.CRAWLER_MAX_SLEEP_SEC = args.crawler_sleep_seconds
@@ -498,10 +483,15 @@ async def main_async() -> None:
     args = parse_args()
     checkpoint_path = Path(args.checkpoint_path)
     args = adopt_checkpoint_job_if_preferred(args, checkpoint_path)
-    crawler = CheckpointedBilibiliCrawler(checkpoint_path=checkpoint_path, args=args)
+    crawler = CheckpointedXhsCrawler(checkpoint_path=checkpoint_path, args=args)
     crawler.ensure_checkpoint()
+
     if args.continuous_backfill:
         initial_day = crawler.get_active_day()
+        if crawler.is_before_oldest_day(initial_day):
+            crawler.mark_backfill_completed(last_completed_day=None, reason="before_oldest_day")
+            return
+
         configure_job(args, start_day=initial_day, end_day=initial_day)
         try:
             await crawler.prepare_session_with_retries()
@@ -528,12 +518,11 @@ async def main_async() -> None:
                         "current_day": active_day,
                         "oldest_day": args.oldest_day,
                         "continuous_backfill": True,
-                        "search_mode": config.BILI_SEARCH_MODE,
+                        "search_mode": config.XHS_SEARCH_MODE,
                         "save_data_option": config.SAVE_DATA_OPTION,
                         "save_data_path": config.SAVE_DATA_PATH,
                         "max_notes_per_day": config.MAX_NOTES_PER_DAY,
-                        "max_comment_items": config.BILI_MAX_COMMENT_ITEMS_PER_VIDEO,
-                        "max_sub_comment_items": config.BILI_MAX_SUB_COMMENTS_PER_VIDEO,
+                        "max_comment_items": config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                         "enable_cdp_mode": config.ENABLE_CDP_MODE,
                         "checkpoint_path": str(checkpoint_path),
                     },
@@ -549,6 +538,7 @@ async def main_async() -> None:
                 if checkpoint.get("state") == "day_failed":
                     crawler.advance_after_failed_day(active_day, reason=checkpoint.get("failure_reason") or "failed_day")
                     continue
+                break
         finally:
             await crawler.close_session()
         return
@@ -562,12 +552,11 @@ async def main_async() -> None:
             "start_day": config.START_DAY,
             "end_day": config.END_DAY,
             "continuous_backfill": False,
-            "search_mode": config.BILI_SEARCH_MODE,
+            "search_mode": config.XHS_SEARCH_MODE,
             "save_data_option": config.SAVE_DATA_OPTION,
             "save_data_path": config.SAVE_DATA_PATH,
             "max_notes_per_day": config.MAX_NOTES_PER_DAY,
-            "max_comment_items": config.BILI_MAX_COMMENT_ITEMS_PER_VIDEO,
-            "max_sub_comment_items": config.BILI_MAX_SUB_COMMENTS_PER_VIDEO,
+            "max_comment_items": config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
             "enable_cdp_mode": config.ENABLE_CDP_MODE,
             "checkpoint_path": str(checkpoint_path),
         },

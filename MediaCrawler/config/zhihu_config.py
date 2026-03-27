@@ -32,3 +32,11 @@ ZHIHU_SPECIFIED_ID_LIST = [
     "https://zhuanlan.zhihu.com/p/673461588",  # article
     "https://www.zhihu.com/zvideo/1539542068422144000",  # video
 ]
+
+# Search mode
+# normal: regular keyword search
+# all_in_time_range: time-range search without daily cap
+# daily_limit_in_time_range: time-range search with MAX_NOTES_PER_DAY cap
+# one_year_stream_bucketed: crawl the whole one-year window in created_time order and
+# route each item/comment into day-bucketed output files by the content publish date
+ZHIHU_SEARCH_MODE = "normal"
