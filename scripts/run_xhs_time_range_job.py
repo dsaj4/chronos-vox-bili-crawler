@@ -24,6 +24,10 @@ DEFAULT_CHECKPOINT_PATH = ROOT_DIR / "artifacts" / "xhs_crawl_monitor" / "checkp
 PREFERRED_JOB_PATH = ROOT_DIR / "artifacts" / "xhs_crawl_monitor" / "preferred_job.json"
 DEFAULT_SAVE_DATA_PATH = ROOT_DIR / "artifacts" / "ai_crawl_data"
 DEFAULT_OLDEST_DAY = date(2013, 1, 1)
+FATAL_FAILURE_REASONS = {
+    "search_request_rejected_logged_out",
+    "search_request_rejected_permission_denied",
+}
 
 
 def configure_console_output() -> None:
@@ -44,6 +48,10 @@ def parse_iso_date(value: str | None) -> date | None:
 
 def default_oldest_day() -> date:
     return DEFAULT_OLDEST_DAY
+
+
+def is_fatal_failure_reason(reason: str | None) -> bool:
+    return str(reason or "").strip() in FATAL_FAILURE_REASONS
 
 
 def is_job_long_backfill(job: dict[str, Any]) -> bool:
@@ -208,6 +216,54 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
             "failure_reason": None,
         }
 
+    def checkpoint_runtime_payload(self) -> dict[str, Any]:
+        checkpoint = self.read_checkpoint()
+        payload = self.checkpoint_base_payload()
+        payload.update(
+            {
+                "state": checkpoint.get("state") or "running",
+                "current_day": checkpoint.get("current_day") or self.current_day,
+                "resume_day": checkpoint.get("resume_day") or self.current_day,
+                "resume_page": checkpoint.get("resume_page", 1),
+                "notes_count_this_day": checkpoint.get("notes_count_this_day", 0),
+                "total_notes_crawled_for_keyword": checkpoint.get("total_notes_crawled_for_keyword", 0),
+                "last_completed_day": checkpoint.get("last_completed_day"),
+                "last_completed_page": checkpoint.get("last_completed_page"),
+                "last_failed_day": checkpoint.get("last_failed_day"),
+                "failure_reason": checkpoint.get("failure_reason"),
+                "reason": checkpoint.get("reason") or "heartbeat",
+            }
+        )
+        return payload
+
+    def write_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: str | None = None,
+        page: int | None = None,
+        notes_count_this_day: int | None = None,
+        total_notes_crawled_for_keyword: int | None = None,
+    ) -> None:
+        payload = self.checkpoint_runtime_payload()
+        if day:
+            self.current_day = day
+            payload["current_day"] = day
+            payload["resume_day"] = day
+        if page is not None:
+            payload["resume_page"] = page
+        if notes_count_this_day is not None:
+            payload["notes_count_this_day"] = notes_count_this_day
+        if total_notes_crawled_for_keyword is not None:
+            payload["total_notes_crawled_for_keyword"] = total_notes_crawled_for_keyword
+        payload["state"] = "running"
+        payload["heartbeat_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload["heartbeat_kind"] = kind
+        payload["heartbeat_cursor"] = cursor
+        payload["reason"] = kind
+        self.write_checkpoint(payload)
+
     def mark_backfill_completed(self, *, last_completed_day: str | None, reason: str) -> None:
         payload = self.checkpoint_base_payload()
         payload.update(
@@ -300,6 +356,11 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
                 self.advance_after_completed_day(last_completed_day, reason="advanced_after_restart")
                 return
             if checkpoint.get("state") == "day_failed":
+                if is_fatal_failure_reason(str(checkpoint.get("failure_reason") or "")):
+                    self.current_day = str(checkpoint.get("current_day") or checkpoint.get("resume_day") or self.args.start_day)
+                    checkpoint["job"] = current_job
+                    self.write_checkpoint(checkpoint)
+                    return
                 last_failed_day = str(checkpoint.get("last_failed_day") or checkpoint.get("current_day") or self.args.start_day)
                 self.advance_after_failed_day(last_failed_day, reason="advanced_after_restart_failed_day")
                 return
@@ -338,6 +399,9 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
                 "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                 "last_completed_day": day,
                 "last_completed_page": next_page - 1,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "page_completed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}|page={next_page - 1}",
                 "reason": "page_completed",
             }
         )
@@ -364,6 +428,9 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
                 "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                 "last_completed_day": day,
                 "last_completed_page": None,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "day_completed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}",
                 "reason": reason,
             }
         )
@@ -387,6 +454,9 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
                     "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                     "last_completed_day": self.current_day,
                     "last_completed_page": None,
+                    "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "heartbeat_kind": "keyword_completed",
+                    "heartbeat_cursor": f"keyword={keyword}|day={self.current_day}",
                     "reason": "day_completed",
                 }
             )
@@ -432,6 +502,9 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
                 "last_completed_page": None,
                 "last_failed_day": day,
                 "failure_reason": reason,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "day_failed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}",
                 "reason": "day_failed",
             }
         )
@@ -441,6 +514,25 @@ class CheckpointedXhsCrawler(XiaoHongShuCrawler):
         current_day = str(checkpoint.get("current_day") or checkpoint.get("resume_day") or self.args.start_day)
         self.current_day = current_day
         return current_day
+
+    def on_progress_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: str | None = None,
+        page: int | None = None,
+        notes_count_this_day: int | None = None,
+        total_notes_crawled_for_keyword: int | None = None,
+    ) -> None:
+        self.write_heartbeat(
+            kind=kind,
+            cursor=cursor,
+            day=day or self.current_day,
+            page=page,
+            notes_count_this_day=notes_count_this_day,
+            total_notes_crawled_for_keyword=total_notes_crawled_for_keyword,
+        )
 
 
 def configure_job(args: argparse.Namespace, *, start_day: str | None = None, end_day: str | None = None) -> None:
@@ -536,7 +628,10 @@ async def main_async() -> None:
                     crawler.advance_after_completed_day(active_day, reason="advanced_to_previous_day")
                     continue
                 if checkpoint.get("state") == "day_failed":
-                    crawler.advance_after_failed_day(active_day, reason=checkpoint.get("failure_reason") or "failed_day")
+                    failure_reason = str(checkpoint.get("failure_reason") or "failed_day")
+                    if is_fatal_failure_reason(failure_reason):
+                        raise RuntimeError(failure_reason)
+                    crawler.advance_after_failed_day(active_day, reason=failure_reason)
                     continue
                 break
         finally:
@@ -571,6 +666,11 @@ async def main_async() -> None:
                 "(WinError 5 / access denied). Please run this crawler from a normal local terminal session."
             ) from exc
         raise
+    checkpoint = crawler.read_checkpoint()
+    if checkpoint.get("state") == "day_failed":
+        failure_reason = str(checkpoint.get("failure_reason") or "failed_day")
+        if is_fatal_failure_reason(failure_reason):
+            raise RuntimeError(failure_reason)
 
 
 if __name__ == "__main__":

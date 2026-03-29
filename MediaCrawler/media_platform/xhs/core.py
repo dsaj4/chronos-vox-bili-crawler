@@ -415,6 +415,18 @@ class XiaoHongShuCrawler(AbstractCrawler):
     ) -> None:
         return None
 
+    def on_progress_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: Optional[str] = None,
+        page: Optional[int] = None,
+        notes_count_this_day: Optional[int] = None,
+        total_notes_crawled_for_keyword: Optional[int] = None,
+    ) -> None:
+        return None
+
     @staticmethod
     def iter_days(start_day: date, end_day: date) -> Iterable[date]:
         current_day = start_day
@@ -706,6 +718,14 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     search_id = get_search_id()
 
                     while True:
+                        self.on_progress_heartbeat(
+                            kind="page_started",
+                            cursor=f"keyword={keyword}|day={day_str}|page={page}",
+                            day=day_str,
+                            page=page,
+                            notes_count_this_day=notes_count_this_day,
+                            total_notes_crawled_for_keyword=total_notes_crawled_for_keyword,
+                        )
                         if notes_count_this_day >= config.MAX_NOTES_PER_DAY:
                             day_completion_reason = "reached_max_notes_per_day"
                             break
@@ -960,6 +980,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
         utils.logger.info(f"[get_note_detail_async_task] Begin get note detail, note_id: {note_id}")
         async with semaphore:
             try:
+                self.on_progress_heartbeat(
+                    kind="detail_started",
+                    cursor=f"note_id={note_id}",
+                    day=getattr(self, "current_day", None),
+                )
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
                 except RetryError:
@@ -976,6 +1001,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 # Sleep after fetching note detail
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                self.on_progress_heartbeat(
+                    kind="detail_completed",
+                    cursor=f"note_id={note_id}",
+                    day=getattr(self, "current_day", None),
+                )
 
                 return note_detail
 
@@ -1019,6 +1049,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
     async def get_comments(self, note_id: str, xsec_token: str, semaphore: asyncio.Semaphore):
         """Get note comments with keyword filtering and quantity limitation"""
         async with semaphore:
+            self.on_progress_heartbeat(
+                kind="comment_started",
+                cursor=f"note_id={note_id}",
+                day=getattr(self, "current_day", None),
+            )
             utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
             # Use fixed crawling interval
             crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
@@ -1033,6 +1068,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
             # Sleep after fetching comments
             await asyncio.sleep(crawl_interval)
             utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for note {note_id}")
+            self.on_progress_heartbeat(
+                kind="comment_completed",
+                cursor=f"note_id={note_id}",
+                day=getattr(self, "current_day", None),
+            )
 
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
         """Create Xiaohongshu client"""

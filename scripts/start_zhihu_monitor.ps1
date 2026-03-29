@@ -6,7 +6,7 @@ param(
   [string]$EndDay = (Get-Date -Format "yyyy-MM-dd"),
   [string]$OldestDay = (Get-Date).AddDays(-364).ToString("yyyy-MM-dd"),
   [int]$CheckIntervalSeconds = 30,
-  [int]$StallTimeoutSeconds = 300,
+  [int]$StallTimeoutSeconds = 600,
   [switch]$Headless,
   [switch]$DisableCdp
 )

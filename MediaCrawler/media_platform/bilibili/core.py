@@ -290,6 +290,18 @@ class BilibiliCrawler(AbstractCrawler):
     ) -> None:
         return None
 
+    def on_progress_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: Optional[str] = None,
+        page: Optional[int] = None,
+        notes_count_this_day: Optional[int] = None,
+        total_notes_crawled_for_keyword: Optional[int] = None,
+    ) -> None:
+        return None
+
     def get_data_base_path(self, file_type: str) -> Path:
         if config.SAVE_DATA_PATH:
             return Path(config.SAVE_DATA_PATH) / "bili" / file_type
@@ -570,6 +582,14 @@ class BilibiliCrawler(AbstractCrawler):
                 day_failure_reason = ""
 
                 while True:
+                    self.on_progress_heartbeat(
+                        kind="page_started",
+                        cursor=f"keyword={keyword}|day={day_str}|page={page}",
+                        day=day_str,
+                        page=page,
+                        notes_count_this_day=notes_count_this_day,
+                        total_notes_crawled_for_keyword=total_notes_crawled_for_keyword,
+                    )
                     if notes_count_this_day >= config.MAX_NOTES_PER_DAY:
                         utils.logger.info(f"[BilibiliCrawler.search] Reached MAX_NOTES_PER_DAY limit for {day.ctime()}.")
                         next_day = day.date() + timedelta(days=1)
@@ -758,6 +778,11 @@ class BilibiliCrawler(AbstractCrawler):
         """
         async with semaphore:
             try:
+                self.on_progress_heartbeat(
+                    kind="comment_started",
+                    cursor=f"video_id={video_id}",
+                    day=getattr(self, "current_day", None),
+                )
                 utils.logger.info(f"[BilibiliCrawler.get_comments] begin get video_id: {video_id} comments ...")
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[BilibiliCrawler.get_comments] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching comments for video {video_id}")
@@ -772,6 +797,11 @@ class BilibiliCrawler(AbstractCrawler):
                         config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                     ),
                     max_sub_comment_count=getattr(config, "BILI_MAX_SUB_COMMENTS_PER_VIDEO", 0),
+                )
+                self.on_progress_heartbeat(
+                    kind="comment_completed",
+                    cursor=f"video_id={video_id}",
+                    day=getattr(self, "current_day", None),
                 )
 
             except DataFetchError as ex:
@@ -835,11 +865,21 @@ class BilibiliCrawler(AbstractCrawler):
         """
         async with semaphore:
             try:
+                self.on_progress_heartbeat(
+                    kind="detail_started",
+                    cursor=f"video_id={bvid or aid}",
+                    day=getattr(self, "current_day", None),
+                )
                 result = await self.bili_client.get_video_info(aid=aid, bvid=bvid)
 
                 # Sleep after fetching video details
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[BilibiliCrawler.get_video_info_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video details {bvid or aid}")
+                self.on_progress_heartbeat(
+                    kind="detail_completed",
+                    cursor=f"video_id={bvid or aid}",
+                    day=getattr(self, "current_day", None),
+                )
 
                 return result
             except DataFetchError as ex:

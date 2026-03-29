@@ -46,6 +46,10 @@ LOGIN_REQUIRED_MARKERS = [
     "please login",
     "please sign in",
     "need login",
+    "qrcode login failed",
+    "qrcode was not found on the page",
+    "login was not confirmed before timeout",
+    "search_request_rejected_logged_out",
     "未登录",
     "登录失败",
     "扫码登录",
@@ -53,6 +57,7 @@ LOGIN_REQUIRED_MARKERS = [
 ACCOUNT_PERMISSION_MARKERS = [
     "没有权限访问",
     "无权限访问",
+    "search_request_rejected_permission_denied",
     "permission denied",
     "account does not have permission",
     "no permission to access",
@@ -69,7 +74,14 @@ NETWORK_ERROR_MARKERS = [
     "network is unreachable",
 ]
 
+HEARTBEAT_PROGRESS_KEYS = (
+    "heartbeat_at",
+    "heartbeat_kind",
+    "heartbeat_cursor",
+)
+
 CHECKPOINT_PROGRESS_KEYS = (
+    *HEARTBEAT_PROGRESS_KEYS,
     "state",
     "current_day",
     "resume_day",
@@ -123,6 +135,7 @@ class PlatformSpec:
     runner_script_name: str
     runtime_dir_name: str
     default_oldest_day_factory: Callable[[], str]
+    default_stall_timeout_seconds: int
     default_max_comment_items: int
     default_max_sub_comment_items: int | None
 
@@ -181,6 +194,7 @@ PLATFORM_SPECS: dict[str, PlatformSpec] = {
         runner_script_name="run_bili_ai_time_range_job.py",
         runtime_dir_name="ai_crawl_monitor",
         default_oldest_day_factory=default_bili_oldest_day,
+        default_stall_timeout_seconds=900,
         default_max_comment_items=500,
         default_max_sub_comment_items=50,
     ),
@@ -190,6 +204,7 @@ PLATFORM_SPECS: dict[str, PlatformSpec] = {
         runner_script_name="run_zhihu_time_range_job.py",
         runtime_dir_name="zhihu_crawl_monitor",
         default_oldest_day_factory=default_zhihu_oldest_day,
+        default_stall_timeout_seconds=600,
         default_max_comment_items=500,
         default_max_sub_comment_items=50,
     ),
@@ -199,6 +214,7 @@ PLATFORM_SPECS: dict[str, PlatformSpec] = {
         runner_script_name="run_xhs_time_range_job.py",
         runtime_dir_name="xhs_crawl_monitor",
         default_oldest_day_factory=default_xhs_oldest_day,
+        default_stall_timeout_seconds=900,
         default_max_comment_items=200,
         default_max_sub_comment_items=None,
     ),
@@ -218,9 +234,28 @@ def ensure_runtime_dir(spec: PlatformSpec) -> None:
     DEFAULT_SAVE_DATA_PATH.mkdir(parents=True, exist_ok=True)
 
 
-def process_exists(pid: int | None) -> bool:
+def parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed
+
+
+def seconds_since(timestamp: Any) -> float | None:
+    parsed = parse_timestamp(timestamp)
+    if parsed is None:
+        return None
+    return max((now() - parsed).total_seconds(), 0.0)
+
+
+def process_probe(pid: int | None) -> tuple[bool | None, str | None]:
     if not pid:
-        return False
+        return False, None
     if sys.platform == "win32":
         result = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
@@ -230,12 +265,23 @@ def process_exists(pid: int | None) -> bool:
             errors="ignore",
         )
         output = result.stdout.strip()
-        return result.returncode == 0 and output and "No tasks are running" not in output
+        stderr = (result.stderr or "").strip()
+        combined = f"{output}\n{stderr}".strip()
+        if result.returncode == 0:
+            return bool(output and "No tasks are running" not in output), None
+        if "Access denied" in combined or "拒绝访问" in combined:
+            return None, "tasklist_access_denied"
+        return False, combined or f"tasklist_returncode_{result.returncode}"
     try:
         os.kill(pid, 0)
     except (OSError, SystemError, ValueError):
-        return False
-    return True
+        return False, None
+    return True, None
+
+
+def process_exists(pid: int | None) -> bool:
+    exists, _ = process_probe(pid)
+    return exists is True
 
 
 def terminate_process_tree(pid: int | None) -> None:
@@ -396,6 +442,38 @@ def checkpoint_progress_marker(checkpoint: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def checkpoint_heartbeat_marker(checkpoint: dict[str, Any]) -> str:
+    if not checkpoint:
+        return ""
+    payload = {key: checkpoint.get(key) for key in HEARTBEAT_PROGRESS_KEYS if checkpoint.get(key)}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload else ""
+
+
+def progress_reference_timestamp(checkpoint: dict[str, Any], raw_payload: dict[str, Any] | None = None) -> str | None:
+    raw_payload = raw_payload or {}
+    for candidate in (
+        checkpoint.get("heartbeat_at"),
+        raw_payload.get("progress_heartbeat_at"),
+        raw_payload.get("last_progress_at"),
+        raw_payload.get("last_output_at"),
+        checkpoint.get("updated_at"),
+        raw_payload.get("updated_at"),
+    ):
+        if candidate:
+            return str(candidate)
+    return None
+
+
+def progress_is_recent(reference_timestamp: str | None, stall_timeout_seconds: int | None) -> bool:
+    if not reference_timestamp:
+        return False
+    timeout_seconds = max(int(stall_timeout_seconds or 0), 1)
+    age_seconds = seconds_since(reference_timestamp)
+    if age_seconds is None:
+        return False
+    return age_seconds <= timeout_seconds
+
+
 def classify_failure_text(text: str, *, fallback: str = "child_exit_nonzero") -> str:
     lowered = text.lower()
     if any(marker.lower() in lowered for marker in PLAYWRIGHT_PERMISSION_MARKERS):
@@ -457,7 +535,11 @@ def build_parser(*, fixed_platform: str | None = None) -> argparse.ArgumentParse
             default=None,
         )
         target.add_argument("--check-interval-seconds", type=int, default=30)
-        target.add_argument("--stall-timeout-seconds", type=int, default=300)
+        target.add_argument(
+            "--stall-timeout-seconds",
+            type=int,
+            default=spec.default_stall_timeout_seconds if spec else None,
+        )
         target.add_argument("--max-notes-per-day", type=int, default=5)
         target.add_argument(
             "--max-comment-items",
@@ -504,6 +586,8 @@ def resolve_platform_and_defaults(args: argparse.Namespace, *, fixed_platform: s
     if getattr(args, "command", None) in {"run", "start"}:
         if args.oldest_day is None:
             args.oldest_day = spec.default_oldest_day()
+        if args.stall_timeout_seconds is None:
+            args.stall_timeout_seconds = spec.default_stall_timeout_seconds
         if args.max_comment_items is None:
             args.max_comment_items = spec.default_max_comment_items
         if args.max_sub_comment_items is None:
@@ -566,6 +650,11 @@ def normalize_status_payload(spec: PlatformSpec) -> dict[str, Any]:
         or raw_payload.get("monitor_log_path")
         or str(spec.monitor_log_path.resolve())
     )
+    stall_timeout_seconds = int(
+        raw_payload.get("stall_timeout_seconds")
+        or (job.get("stall_timeout_seconds") if isinstance(job, dict) else 0)
+        or spec.default_stall_timeout_seconds
+    )
     failure_class = raw_payload.get("failure_class")
     failure_reason = raw_payload.get("failure_reason") or checkpoint.get("failure_reason")
     if not failure_reason and (monitor_state == "error" or (isinstance(child_exit_code, int) and child_exit_code not in (None, 0))):
@@ -581,11 +670,49 @@ def normalize_status_payload(spec: PlatformSpec) -> dict[str, Any]:
         if not failure_reason:
             failure_reason = inferred_reason
 
+    progress_heartbeat_at = progress_reference_timestamp(checkpoint, raw_payload)
+    healthy = monitor_state in RUNNING_STATES and progress_is_recent(progress_heartbeat_at, stall_timeout_seconds)
+    monitor_live, monitor_live_reason = process_probe(monitor_pid if isinstance(monitor_pid, int) else None)
+    child_live, child_live_reason = process_probe(child_pid if isinstance(child_pid, int) else None)
+    inferred_live = raw_payload.get("live")
+    if inferred_live is None:
+        if monitor_state in RUNNING_STATES:
+            inferred_live = child_live if child_pid else monitor_live
+        elif monitor_state in ACTIVE_STATES:
+            inferred_live = monitor_live
+        else:
+            inferred_live = False
+
+    degraded_reason = raw_payload.get("degraded_reason") or ""
+    degraded = bool(raw_payload.get("degraded"))
+    if monitor_state in RUNNING_STATES:
+        if not healthy:
+            degraded = True
+            degraded_reason = "progress_stale"
+        elif raw_payload.get("consecutive_failures", 0):
+            degraded = True
+            degraded_reason = "recovering_after_failures"
+        elif raw_payload.get("current_disable_cdp", raw_payload.get("disable_cdp", False)):
+            degraded = True
+            degraded_reason = "running_with_disable_cdp"
+        elif inferred_live is False:
+            degraded = True
+            degraded_reason = child_live_reason or monitor_live_reason or "process_not_observed"
+        else:
+            degraded = False
+            degraded_reason = ""
+    else:
+        degraded = False
+        degraded_reason = ""
+
     normalized = {
         "platform": spec.name,
         "monitor_state": monitor_state,
         "job_state": checkpoint.get("state") or raw_payload.get("job_state") or monitor_state,
-        "healthy": False,
+        "healthy": healthy,
+        "live": inferred_live,
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
         "monitor_pid": monitor_pid,
         "child_pid": child_pid,
         "child_exit_code": child_exit_code,
@@ -604,6 +731,9 @@ def normalize_status_payload(spec: PlatformSpec) -> dict[str, Any]:
         "comments_emitted": checkpoint.get("comments_emitted"),
         "last_emitted_day": checkpoint.get("last_emitted_day"),
         "last_result_created_day": checkpoint.get("last_result_created_day"),
+        "progress_heartbeat_at": progress_heartbeat_at,
+        "heartbeat_kind": checkpoint.get("heartbeat_kind"),
+        "heartbeat_cursor": checkpoint.get("heartbeat_cursor"),
         "last_progress_at": last_progress_at,
         "failure_class": failure_class,
         "failure_reason": failure_reason,
@@ -621,14 +751,12 @@ def normalize_status_payload(spec: PlatformSpec) -> dict[str, Any]:
         or tail_last_non_empty_line(Path(latest_crawler_log)) if latest_crawler_log else "",
         "last_repair_action": raw_payload.get("last_repair_action", "none"),
         "current_disable_cdp": raw_payload.get("current_disable_cdp", raw_payload.get("disable_cdp", False)),
+        "check_interval_seconds": raw_payload.get("check_interval_seconds", 30),
         "monitor_log_path": str(spec.monitor_log_path.resolve()),
         "crawler_log_path": str(spec.latest_crawler_summary_path.resolve()),
         "latest_run_path": str(spec.latest_run_path.resolve()),
+        "stall_timeout_seconds": stall_timeout_seconds,
     }
-
-    monitor_ok = process_exists(monitor_pid if isinstance(monitor_pid, int) else None)
-    child_ok = process_exists(child_pid if isinstance(child_pid, int) else None)
-    normalized["healthy"] = monitor_state in RUNNING_STATES and monitor_ok and child_ok
     return normalized
 
 
@@ -652,6 +780,7 @@ class UnifiedCrawlerMonitor:
         self.last_progress_at: str | None = None
         self._last_progress_monotonic = 0.0
         self._last_progress_marker = ""
+        self._last_heartbeat_marker = ""
         self._progress_seen_in_current_run = False
         self._run_started_at: str | None = None
 
@@ -693,7 +822,8 @@ class UnifiedCrawlerMonitor:
         self.state = "starting"
         checkpoint = read_json(self.spec.checkpoint_path)
         self._last_progress_marker = checkpoint_progress_marker(checkpoint)
-        self.last_progress_at = checkpoint.get("updated_at") if checkpoint else now_iso()
+        self._last_heartbeat_marker = checkpoint_heartbeat_marker(checkpoint)
+        self.last_progress_at = progress_reference_timestamp(checkpoint) or now_iso()
         self._last_progress_monotonic = time.monotonic()
         self.write_status(message="monitor_booting")
 
@@ -754,7 +884,8 @@ class UnifiedCrawlerMonitor:
         self._progress_seen_in_current_run = False
         checkpoint = read_json(self.spec.checkpoint_path)
         self._last_progress_marker = checkpoint_progress_marker(checkpoint)
-        self.last_progress_at = checkpoint.get("updated_at") if checkpoint else self._run_started_at
+        self._last_heartbeat_marker = checkpoint_heartbeat_marker(checkpoint)
+        self.last_progress_at = progress_reference_timestamp(checkpoint) or self._run_started_at
         self._last_progress_monotonic = time.monotonic()
         self.failure_class = None
         self.failure_reason = ""
@@ -806,12 +937,22 @@ class UnifiedCrawlerMonitor:
 
     def refresh_progress(self) -> None:
         checkpoint = self.current_checkpoint()
+        heartbeat_marker = checkpoint_heartbeat_marker(checkpoint)
         marker = checkpoint_progress_marker(checkpoint)
-        if marker and marker != self._last_progress_marker:
+        if heartbeat_marker and heartbeat_marker != self._last_heartbeat_marker:
+            self._last_heartbeat_marker = heartbeat_marker
             self._last_progress_marker = marker
             self._last_progress_monotonic = time.monotonic()
-            self.last_progress_at = checkpoint.get("updated_at") or now_iso()
+            self.last_progress_at = progress_reference_timestamp(checkpoint) or now_iso()
             self._progress_seen_in_current_run = True
+            self.consecutive_failures = 0
+        elif marker and marker != self._last_progress_marker:
+            self._last_heartbeat_marker = heartbeat_marker
+            self._last_progress_marker = marker
+            self._last_progress_monotonic = time.monotonic()
+            self.last_progress_at = progress_reference_timestamp(checkpoint) or now_iso()
+            self._progress_seen_in_current_run = True
+            self.consecutive_failures = 0
         elif not marker and self.current_run_log_path and self.current_run_log_path.exists():
             self.last_progress_at = datetime.fromtimestamp(
                 self.current_run_log_path.stat().st_mtime
@@ -823,7 +964,10 @@ class UnifiedCrawlerMonitor:
         if not self.child_process or self.child_process.poll() is not None:
             return False
         checkpoint = self.current_checkpoint()
+        heartbeat_marker = checkpoint_heartbeat_marker(checkpoint)
         marker = checkpoint_progress_marker(checkpoint)
+        if heartbeat_marker:
+            return (time.monotonic() - self._last_progress_monotonic) >= self.args.stall_timeout_seconds
         if marker:
             return (time.monotonic() - self._last_progress_monotonic) >= self.args.stall_timeout_seconds
         if self.current_run_log_path and self.current_run_log_path.exists():
@@ -855,6 +999,7 @@ class UnifiedCrawlerMonitor:
         write_text(self.spec.latest_crawler_summary_path, "\n".join(lines) + "\n")
 
     def write_run_manifest(self, *, child_exit_code: int | None = None) -> None:
+        checkpoint = self.current_checkpoint()
         payload = {
             "platform": self.spec.name,
             "run_id": self.current_run_id,
@@ -876,6 +1021,7 @@ class UnifiedCrawlerMonitor:
             "consecutive_failures": self.consecutive_failures,
             "current_disable_cdp": self.current_disable_cdp,
             "last_progress_at": self.last_progress_at,
+            "progress_heartbeat_at": progress_reference_timestamp(checkpoint),
         }
         if self.current_run_manifest_path:
             write_json(self.current_run_manifest_path, payload)
@@ -893,12 +1039,34 @@ class UnifiedCrawlerMonitor:
         self.write_run_manifest(child_exit_code=child_exit_code)
 
         child_pid = self.child_process.pid if self.child_process and self.child_process.poll() is None else None
+        progress_heartbeat_at = progress_reference_timestamp(checkpoint) or self.last_progress_at or last_output_at
+        healthy = self.state in RUNNING_STATES and progress_is_recent(
+            progress_heartbeat_at,
+            self.args.stall_timeout_seconds,
+        )
+        live = child_pid is not None if self.state in RUNNING_STATES else False
+        degraded = False
+        degraded_reason = ""
+        if self.state in RUNNING_STATES:
+            if not healthy:
+                degraded = True
+                degraded_reason = "progress_stale"
+            elif self.consecutive_failures > 0:
+                degraded = True
+                degraded_reason = "recovering_after_failures"
+            elif self.current_disable_cdp:
+                degraded = True
+                degraded_reason = "running_with_disable_cdp"
+
         payload = {
             "platform": self.spec.name,
             "updated_at": now_iso(),
             "monitor_state": self.state,
             "job_state": checkpoint.get("state") or self.state,
-            "healthy": self.state in RUNNING_STATES and process_exists(child_pid),
+            "healthy": healthy,
+            "live": live,
+            "degraded": degraded,
+            "degraded_reason": degraded_reason,
             "message": message,
             "monitor_pid": os.getpid(),
             "child_pid": child_pid,
@@ -906,6 +1074,8 @@ class UnifiedCrawlerMonitor:
             "run_id": self.current_run_id,
             "restart_count": self.restart_count,
             "consecutive_failures": self.consecutive_failures,
+            "check_interval_seconds": self.args.check_interval_seconds,
+            "stall_timeout_seconds": self.args.stall_timeout_seconds,
             "current_day": checkpoint.get("current_day") or checkpoint.get("last_emitted_day"),
             "resume_day": checkpoint.get("resume_day") or checkpoint.get("last_emitted_day"),
             "resume_page": checkpoint.get("resume_page"),
@@ -918,6 +1088,9 @@ class UnifiedCrawlerMonitor:
             "comments_emitted": checkpoint.get("comments_emitted"),
             "last_emitted_day": checkpoint.get("last_emitted_day"),
             "last_result_created_day": checkpoint.get("last_result_created_day"),
+            "progress_heartbeat_at": progress_heartbeat_at,
+            "heartbeat_kind": checkpoint.get("heartbeat_kind"),
+            "heartbeat_cursor": checkpoint.get("heartbeat_cursor"),
             "last_progress_at": self.last_progress_at,
             "failure_class": self.failure_class,
             "failure_reason": self.failure_reason,

@@ -222,6 +222,54 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
             "failure_reason": None,
         }
 
+    def checkpoint_runtime_payload(self) -> dict[str, Any]:
+        checkpoint = self.read_checkpoint()
+        payload = self.checkpoint_base_payload()
+        payload.update(
+            {
+                "state": checkpoint.get("state") or "running",
+                "current_day": checkpoint.get("current_day") or self.current_day,
+                "resume_day": checkpoint.get("resume_day") or self.current_day,
+                "resume_page": checkpoint.get("resume_page", 1),
+                "notes_count_this_day": checkpoint.get("notes_count_this_day", 0),
+                "total_notes_crawled_for_keyword": checkpoint.get("total_notes_crawled_for_keyword", 0),
+                "last_completed_day": checkpoint.get("last_completed_day"),
+                "last_completed_page": checkpoint.get("last_completed_page"),
+                "last_failed_day": checkpoint.get("last_failed_day"),
+                "failure_reason": checkpoint.get("failure_reason"),
+                "reason": checkpoint.get("reason") or "heartbeat",
+            }
+        )
+        return payload
+
+    def write_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: str | None = None,
+        page: int | None = None,
+        notes_count_this_day: int | None = None,
+        total_notes_crawled_for_keyword: int | None = None,
+    ) -> None:
+        payload = self.checkpoint_runtime_payload()
+        if day:
+            self.current_day = day
+            payload["current_day"] = day
+            payload["resume_day"] = day
+        if page is not None:
+            payload["resume_page"] = page
+        if notes_count_this_day is not None:
+            payload["notes_count_this_day"] = notes_count_this_day
+        if total_notes_crawled_for_keyword is not None:
+            payload["total_notes_crawled_for_keyword"] = total_notes_crawled_for_keyword
+        payload["state"] = "running"
+        payload["heartbeat_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload["heartbeat_kind"] = kind
+        payload["heartbeat_cursor"] = cursor
+        payload["reason"] = kind
+        self.write_checkpoint(payload)
+
     def mark_backfill_completed(self, *, last_completed_day: str | None, reason: str) -> None:
         payload = self.checkpoint_base_payload()
         payload.update(
@@ -352,6 +400,9 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
                 "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                 "last_completed_day": day,
                 "last_completed_page": next_page - 1,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "page_completed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}|page={next_page - 1}",
                 "reason": "page_completed",
             }
         )
@@ -378,6 +429,9 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
                 "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                 "last_completed_day": day,
                 "last_completed_page": None,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "day_completed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}",
                 "reason": reason,
             }
         )
@@ -401,6 +455,9 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
                     "total_notes_crawled_for_keyword": total_notes_crawled_for_keyword,
                     "last_completed_day": self.current_day,
                     "last_completed_page": None,
+                    "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "heartbeat_kind": "keyword_completed",
+                    "heartbeat_cursor": f"keyword={keyword}|day={self.current_day}",
                     "reason": "day_completed",
                 }
             )
@@ -446,6 +503,9 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
                 "last_completed_page": None,
                 "last_failed_day": day,
                 "failure_reason": reason,
+                "heartbeat_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "heartbeat_kind": "day_failed",
+                "heartbeat_cursor": f"keyword={keyword}|day={day}",
                 "reason": "day_failed",
             }
         )
@@ -455,6 +515,25 @@ class CheckpointedBilibiliCrawler(BilibiliCrawler):
         current_day = str(checkpoint.get("current_day") or checkpoint.get("resume_day") or self.args.start_day)
         self.current_day = current_day
         return current_day
+
+    def on_progress_heartbeat(
+        self,
+        *,
+        kind: str,
+        cursor: str,
+        day: str | None = None,
+        page: int | None = None,
+        notes_count_this_day: int | None = None,
+        total_notes_crawled_for_keyword: int | None = None,
+    ) -> None:
+        self.write_heartbeat(
+            kind=kind,
+            cursor=cursor,
+            day=day or self.current_day,
+            page=page,
+            notes_count_this_day=notes_count_this_day,
+            total_notes_crawled_for_keyword=total_notes_crawled_for_keyword,
+        )
 
 
 def configure_job(args: argparse.Namespace, *, start_day: str | None = None, end_day: str | None = None) -> None:
